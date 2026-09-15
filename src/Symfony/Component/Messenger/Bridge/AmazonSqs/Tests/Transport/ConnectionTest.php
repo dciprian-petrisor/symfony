@@ -13,6 +13,7 @@ namespace Symfony\Component\Messenger\Bridge\AmazonSqs\Tests\Transport;
 
 use AsyncAws\Core\Exception\Http\HttpException;
 use AsyncAws\Core\Exception\Http\NetworkException;
+use AsyncAws\Core\Result;
 use AsyncAws\Core\Test\ResultMockFactory;
 use AsyncAws\Sqs\Enum\QueueAttributeName;
 use AsyncAws\Sqs\Result\GetQueueUrlResult;
@@ -464,7 +465,7 @@ class ConnectionTest extends TestCase
         $connection = new Connection(['queue_name' => 'ab1-MyQueue-A2BCDEF3GHI4', 'account' => '123456789012'], $client, 'https://sqs.us-east-2.amazonaws.com/123456789012/ab1-MyQueue-A2BCDEF3GHI4');
 
         $client->expects($this->never())->method('getQueueUrl');
-        $client->expects($this->once())->method('deleteMessage');
+        $client->expects($this->once())->method('deleteMessage')->willReturn(ResultMockFactory::create(Result::class));
 
         $connection->delete('id');
     }
@@ -502,7 +503,7 @@ class ConnectionTest extends TestCase
         ];
 
         $client = $this->createMock(SqsClient::class);
-        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams);
+        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams)->willReturn(ResultMockFactory::create(Result::class));
 
         $connection = new Connection(['visibility_timeout' => $visibilityTimeout], $client, $queueUrl);
         $connection->keepalive($id);
@@ -517,7 +518,7 @@ class ConnectionTest extends TestCase
         ];
 
         $client = $this->createMock(SqsClient::class);
-        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams);
+        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams)->willReturn(ResultMockFactory::create(Result::class));
 
         $connection = new Connection([], $client, $queueUrl);
         $connection->keepalive($id, 5);
@@ -543,7 +544,7 @@ class ConnectionTest extends TestCase
         ];
 
         $client = $this->createMock(SqsClient::class);
-        $client->expects($this->once())->method('deleteMessage')->with($expectedParams);
+        $client->expects($this->once())->method('deleteMessage')->with($expectedParams)->willReturn(ResultMockFactory::create(Result::class));
 
         $connection = new Connection([], $client, $queueUrl);
         $connection->reject($id);
@@ -558,7 +559,7 @@ class ConnectionTest extends TestCase
         ];
 
         $client = $this->createMock(SqsClient::class);
-        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams);
+        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams)->willReturn(ResultMockFactory::create(Result::class));
 
         $connection = new Connection(['delete_on_rejection' => false, 'visibility_timeout' => 30], $client, $queueUrl);
         $connection->reject($id);
@@ -573,7 +574,7 @@ class ConnectionTest extends TestCase
         ];
 
         $client = $this->createMock(SqsClient::class);
-        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams);
+        $client->expects($this->once())->method('changeMessageVisibility')->with($expectedParams)->willReturn(ResultMockFactory::create(Result::class));
 
         $connection = new Connection(['delete_on_rejection' => false, 'retry_delay' => $retryDelay], $client, $queueUrl);
         $connection->reject($id);
@@ -642,6 +643,51 @@ class ConnectionTest extends TestCase
         } finally {
             pcntl_async_signals($previousAsync);
         }
+    }
+
+    #[RequiresPhpExtension('pcntl')]
+    #[RequiresPhpExtension('posix')]
+    #[DataProvider('provideCallsWhoseResultIsDiscarded')]
+    public function testItHoldsTheSignalsUntilTheRequestIsSent(\Closure $call)
+    {
+        $received = false;
+        $sent = false;
+        $receivedWhileSending = null;
+        $previousHandler = pcntl_signal_get_handler(\SIGUSR1);
+        $previousAsync = pcntl_async_signals(true);
+        pcntl_signal(\SIGUSR1, static function () use (&$received) { $received = true; });
+
+        try {
+            // AsyncAws sends the request when the result is resolved or destructed, not when it is created
+            $body = (static function () use (&$received, &$sent, &$receivedWhileSending) {
+                $sent = true;
+                posix_kill(posix_getpid(), \SIGUSR1);
+                $receivedWhileSending = $received;
+
+                yield '{}';
+            })();
+
+            $httpClient = new MockHttpClient(new MockResponse($body));
+            $client = new SqsClient(['region' => 'eu-west-1', 'accessKeyId' => 'key', 'accessKeySecret' => 'secret'], null, $httpClient);
+            $connection = new Connection(['queue_name' => 'queue', 'auto_setup' => false, 'delete_on_rejection' => false, 'visibility_timeout' => 30], $client, 'https://sqs.eu-west-1.amazonaws.com/123456789012/queue');
+
+            $call($connection);
+
+            $this->assertTrue($sent);
+            $this->assertFalse($receivedWhileSending);
+            $this->assertTrue($received);
+        } finally {
+            pcntl_signal(\SIGUSR1, $previousHandler);
+            pcntl_async_signals($previousAsync);
+        }
+    }
+
+    public static function provideCallsWhoseResultIsDiscarded(): iterable
+    {
+        yield 'delete' => [static fn (Connection $connection) => $connection->delete('abc')];
+        yield 'reject' => [static fn (Connection $connection) => $connection->reject('abc')];
+        yield 'keepalive' => [static fn (Connection $connection) => $connection->keepalive('abc', 5)];
+        yield 'send' => [static fn (Connection $connection) => $connection->send('body', [])];
     }
 
     public function testQueueAttributesAndTags()

@@ -326,7 +326,7 @@ class Connection
         $this->holdSignals(fn () => $this->client->deleteMessage([
             'QueueUrl' => $this->getQueueUrl(),
             'ReceiptHandle' => $id,
-        ]));
+        ])->resolve());
     }
 
     public function reject(string $id): void
@@ -338,7 +338,7 @@ class Connection
                 'QueueUrl' => $this->getQueueUrl(),
                 'ReceiptHandle' => $id,
                 'VisibilityTimeout' => $this->configuration['retry_delay'],
-            ]));
+            ])->resolve());
         }
     }
 
@@ -364,7 +364,7 @@ class Connection
             'QueueUrl' => $this->getQueueUrl(),
             'ReceiptHandle' => $id,
             'VisibilityTimeout' => $visibilityTimeout,
-        ]));
+        ])->resolve());
     }
 
     public function getMessageCount(): int
@@ -429,7 +429,7 @@ class Connection
             unset($parameters['DelaySeconds']);
         }
 
-        $this->holdSignals(fn () => $this->client->sendMessage($parameters));
+        $this->holdSignals(fn () => $this->client->sendMessage($parameters)->resolve());
     }
 
     public function reset(): void
@@ -485,6 +485,9 @@ class Connection
      * client, which refuses the call. Holding the signals here and dispatching them once the
      * request is over sends the keepalive a moment later instead. Nesting is free: the inner call
      * finds the signals already held and leaves them to the outer one.
+     *
+     * An AsyncAws result sends its request only when it is resolved or destructed, so $command
+     * must resolve it: a result returned unresolved is destructed after the signals are back on.
      *
      * @param-immediately-invoked-callable $command
      */
